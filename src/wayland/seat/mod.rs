@@ -159,11 +159,15 @@ impl<D: SeatHandler> Inner<D> {
 /// Global data of WlSeat
 pub struct SeatGlobalData<D: SeatHandler> {
     arc: Arc<SeatRc<D>>,
+    filter: Option<Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>>,
 }
 
 impl<D: SeatHandler> fmt::Debug for SeatGlobalData<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SeatGlobalData").field("arc", &self.arc).finish()
+        f.debug_struct("SeatGlobalData")
+            .field("arc", &self.arc)
+            .field("filter", &self.filter.is_some())
+            .finish()
     }
 }
 
@@ -183,9 +187,44 @@ impl<D: SeatHandler + 'static> SeatState<D> {
         <D as SeatHandler>::KeyboardFocus: WaylandFocus,
         N: Into<String>,
     {
+        self.new_wl_seat_inner(display, name, None)
+    }
+
+    /// Create a new seat global that only some clients can see
+    ///
+    /// Same as [`new_wl_seat`](Self::new_wl_seat), but the global is only advertised to clients
+    /// for which `filter` returns `true`. This allows, for example, a seat used for automation
+    /// to be hidden from clients that only handle a single seat.
+    pub fn new_wl_seat_with_filter<N, F>(&mut self, display: &DisplayHandle, name: N, filter: F) -> Seat<D>
+    where
+        D: GlobalDispatch<WlSeat, SeatGlobalData<D>> + SeatHandler + 'static,
+        <D as SeatHandler>::PointerFocus: WaylandFocus,
+        <D as SeatHandler>::KeyboardFocus: WaylandFocus,
+        N: Into<String>,
+        F: for<'c> Fn(&'c Client) -> bool + Send + Sync + 'static,
+    {
+        self.new_wl_seat_inner(display, name, Some(Box::new(filter)))
+    }
+
+    fn new_wl_seat_inner<N>(
+        &mut self,
+        display: &DisplayHandle,
+        name: N,
+        filter: Option<Box<dyn for<'c> Fn(&'c Client) -> bool + Send + Sync>>,
+    ) -> Seat<D>
+    where
+        D: GlobalDispatch<WlSeat, SeatGlobalData<D>> + SeatHandler + 'static,
+        <D as SeatHandler>::PointerFocus: WaylandFocus,
+        <D as SeatHandler>::KeyboardFocus: WaylandFocus,
+        N: Into<String>,
+    {
         let Seat { arc } = self.new_seat(name);
 
-        let global_id = display.create_global::<D, _, _>(9, SeatGlobalData { arc: arc.clone() });
+        let data = SeatGlobalData {
+            arc: arc.clone(),
+            filter,
+        };
+        let global_id = display.create_global::<D, _, _>(9, data);
         arc.inner.lock().unwrap().global = Some(global_id);
 
         Seat { arc }
@@ -408,5 +447,9 @@ where
 
         resource.capabilities(inner.compute_caps());
         inner.known_seats.push(resource.downgrade());
+    }
+
+    fn can_view(&self, client: &Client) -> bool {
+        self.filter.as_ref().is_none_or(|filter| filter(client))
     }
 }
