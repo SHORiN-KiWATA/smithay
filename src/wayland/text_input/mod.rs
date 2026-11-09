@@ -91,6 +91,25 @@ impl<D: SeatHandler + 'static> TextInputSeat for Seat<D> {
     }
 }
 
+struct TextInputSeatRedirect<D: SeatHandler>(Box<dyn Fn(&Client) -> Option<Seat<D>>>);
+
+/// Serve text inputs that clients create for `seat` with another seat, chosen per client.
+///
+/// When `redirect` returns a seat for the client, the new text input belongs to that seat's
+/// text input and input method instead: it follows that seat's keyboard focus, and that seat's
+/// input method composes text for it. This lets a seat without an input method of its own share
+/// one, for clients that get their keyboard input through it.
+///
+/// Only the first call for a seat has an effect, and only text inputs created afterwards are
+/// redirected.
+pub fn set_text_input_seat_redirect<D: SeatHandler + 'static>(
+    seat: &Seat<D>,
+    redirect: impl Fn(&Client) -> Option<Seat<D>> + 'static,
+) {
+    seat.user_data()
+        .insert_if_missing(|| TextInputSeatRedirect::<D>(Box::new(redirect)));
+}
+
 /// State of wp text input protocol
 #[derive(Debug)]
 pub struct TextInputManagerState {
@@ -144,7 +163,7 @@ where
     fn request(
         &self,
         _state: &mut D,
-        _client: &Client,
+        client: &Client,
         _resource: &ZwpTextInputManagerV3,
         request: zwp_text_input_manager_v3::Request,
         _dhandle: &DisplayHandle,
@@ -152,7 +171,14 @@ where
     ) {
         match request {
             zwp_text_input_manager_v3::Request::GetTextInput { id, seat } => {
-                let seat = Seat::<D>::from_resource(&seat).unwrap();
+                let mut seat = Seat::<D>::from_resource(&seat).unwrap();
+                let redirected = seat
+                    .user_data()
+                    .get::<TextInputSeatRedirect<D>>()
+                    .and_then(|redirect| (redirect.0)(client));
+                if let Some(redirected) = redirected {
+                    seat = redirected;
+                }
 
                 let user_data = seat.user_data();
                 user_data.insert_if_missing(TextInputHandle::default);
